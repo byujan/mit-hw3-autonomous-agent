@@ -369,12 +369,27 @@ class TestCycle(unittest.TestCase):
             fake.add_entry(SUBSTANTIVE.replace("cron", f"cron variant {i}"))
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_cfg(tmp)
+            cfg.min_minutes_between_posts = 0  # isolate the hourly cap
             outcomes = [run_cycle(cfg, client=client_for(fake, cfg)).outcome for _ in range(6)]
             posted = sum(1 for o in outcomes if o == "posted")
             self.assertLessEqual(posted, cfg.max_posts_per_hour)
             mem = Memory(cfg.db_path)
             self.assertLessEqual(mem.posts_in_last(timedelta(hours=1)), 3)
             mem.close()
+
+    def test_min_spacing_blocks_rapid_second_post(self):
+        """Under the hourly cap, consecutive cycles must still pace themselves."""
+        fake = FakeCanvas()
+        fake.add_entry(SUBSTANTIVE)
+        fake.add_entry(SUBSTANTIVE.replace("cron", "a scheduler").replace("JSON", "TOML"))
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_cfg(tmp)
+            cfg.min_minutes_between_posts = 45
+            first = run_cycle(cfg, client=client_for(fake, cfg))
+            second = run_cycle(cfg, client=client_for(fake, cfg))
+            self.assertEqual(first.outcome, "posted")
+            self.assertEqual(second.outcome, "no_action")
+            self.assertIn("spacing", second.reason)
 
     def test_repeated_failures_open_circuit_breaker(self):
         fake = FakeCanvas()

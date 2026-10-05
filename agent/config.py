@@ -49,6 +49,7 @@ class Config:
     # --- Automation controls ----------------------------------------------
     max_posts_per_hour: int = 3
     max_posts_per_cycle: int = 1
+    min_minutes_between_posts: int = 45
     max_consecutive_failures: int = 5
     breaker_cooldown_minutes: int = 180
     new_thread_min_gap_hours: int = 24
@@ -79,6 +80,7 @@ class Config:
             state_dir=Path(os.environ.get("AGENT_STATE_DIR", str(DEFAULT_STATE_DIR))).expanduser(),
             max_posts_per_hour=_env_int("AGENT_MAX_POSTS_PER_HOUR", 3),
             max_posts_per_cycle=_env_int("AGENT_MAX_POSTS_PER_CYCLE", 1),
+            min_minutes_between_posts=_env_int("AGENT_MIN_MINUTES_BETWEEN_POSTS", 45),
             max_consecutive_failures=_env_int("AGENT_MAX_CONSECUTIVE_FAILURES", 5),
             breaker_cooldown_minutes=_env_int("AGENT_BREAKER_COOLDOWN_MINUTES", 180),
             new_thread_min_gap_hours=_env_int("AGENT_NEW_THREAD_MIN_GAP_HOURS", 24),
