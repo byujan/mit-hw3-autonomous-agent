@@ -92,6 +92,17 @@ CREATE TABLE IF NOT EXISTS runs (
     detail       TEXT
 );
 
+-- Which specific forum item each of our posts was a response to. Canvas
+-- replies are flat (you always POST to the parent entry), so "have I already
+-- answered this reply?" cannot be derived from the parent id alone.
+CREATE TABLE IF NOT EXISTS responses (
+    prompt_item_type TEXT NOT NULL,       -- 'entry' | 'reply'
+    prompt_item_id   TEXT NOT NULL,
+    our_canvas_id    TEXT NOT NULL,
+    posted_at        TEXT NOT NULL,
+    PRIMARY KEY (prompt_item_type, prompt_item_id)
+);
+
 CREATE TABLE IF NOT EXISTS breaker (
     id                    INTEGER PRIMARY KEY CHECK (id = 1),
     consecutive_failures  INTEGER NOT NULL DEFAULT 0,
@@ -253,7 +264,15 @@ class Memory:
             )
         return key, True
 
-    def confirm_intent(self, idem_key: str, canvas_id: str, *, verified: bool = False) -> None:
+    def confirm_intent(
+        self,
+        idem_key: str,
+        canvas_id: str,
+        *,
+        verified: bool = False,
+        prompt_item_type: str | None = None,
+        prompt_item_id: str | None = None,
+    ) -> None:
         now = iso(utcnow())
         row = self.conn.execute("SELECT * FROM intents WHERE idem_key=?", (idem_key,)).fetchone()
         if row is None:
@@ -278,6 +297,20 @@ class Memory:
                     now,
                 ),
             )
+            if prompt_item_type and prompt_item_id:
+                c.execute(
+                    "INSERT OR REPLACE INTO responses "
+                    "(prompt_item_type,prompt_item_id,our_canvas_id,posted_at) VALUES (?,?,?,?)",
+                    (prompt_item_type, str(prompt_item_id), str(canvas_id), now),
+                )
+
+    def have_responded_to(self, item_type: str, item_id: str) -> bool:
+        """Have we already answered this specific entry or reply?"""
+        row = self.conn.execute(
+            "SELECT 1 FROM responses WHERE prompt_item_type=? AND prompt_item_id=?",
+            (item_type, str(item_id)),
+        ).fetchone()
+        return row is not None
 
     def fail_intent(self, idem_key: str, error: str) -> None:
         with self.tx() as c:

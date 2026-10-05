@@ -28,7 +28,8 @@ python3 -m agent bootstrap
 AGENT_DRY_RUN=1 python3 -m agent run --trigger manual
 
 # 4. Install the schedule (every 3 hours)
-./scripts/install_cron.sh 3
+./scripts/install_launchd.sh            # macOS (launchd)
+# ./scripts/install_cron.sh 3           # Linux (cron)
 
 # 5. Observe
 python3 -m agent status
@@ -52,9 +53,9 @@ only from the environment; it never appears in source, output, or the database.
 ## Architecture
 
 ```
-cron (every 3h)
+launchd (every 3h)  ──  macOS;  cron on Linux
   └─> scripts/run_cycle.sh        PID-file single-flight, loads .env, never passes
-      └─> python3 -m agent run        secrets on argv
+      └─> python3 -m agent run        secrets on argv; exports AGENT_INVOKED_BY=cron
           └─> agent/runner.run_cycle()
                 1. memory.start_run()                  — audit row for this cycle
                 2. reconcile_pending()                 — recover interrupted writes
@@ -70,18 +71,30 @@ cron (every 3h)
 | `agent/config.py` | Environment-only configuration; hard-caps posts/hour at 3 |
 | `agent/canvas.py` | REST client: pagination, timeouts, backoff; **no update/delete methods** |
 | `agent/sanitize.py` | HTML→text, prompt-injection screening, outbound secret scrub |
-| `agent/memory.py` | SQLite: seen-set, two-phase intents, post ledger, runs, breaker |
+| `agent/memory.py` | SQLite: seen-set, two-phase intents, post ledger, responses, runs, breaker |
 | `agent/decide.py` | Scoring, the do-nothing decision, reply/thread composition |
 | `agent/runner.py` | One cycle: control line, reconciliation, verified write |
 | `agent/cli.py` | `bootstrap` / `run` / `status` / `evidence` / `reset-breaker` |
 
 ### Scheduler
 
-`cron` runs `scripts/run_cycle.sh` every three hours at :07. The script loads
-`.env`, refuses to start without a token, and holds a PID-file lock so a slow
-cycle can never overlap the next one and double-post. It exits 0 on handled
-failures so cron does not treat the agent as a crash loop. Each invocation is a
-complete, independent cycle — no daemon, no human input, nothing to press.
+On macOS the schedule is a launchd user agent (`edu.mit.hw3.agent`,
+`StartInterval` 10800s) installed by `scripts/install_launchd.sh`; on Linux use
+`scripts/install_cron.sh`. **launchd rather than cron on macOS is deliberate:**
+since 10.15, `/usr/sbin/cron` requires Full Disk Access to be granted by hand,
+and without it the crontab installs cleanly but silently never fires — which is
+exactly the kind of failure that looks like working automation.
+
+Either scheduler runs `scripts/run_cycle.sh`, which loads `.env`, refuses to
+start without a token, and holds a PID-file lock so a slow cycle can never
+overlap the next one and double-post. It exits 0 on handled failures so the
+scheduler does not treat the agent as a crash loop. Each invocation is a
+complete, independent cycle with no human input.
+
+Run provenance is **proved, not asserted**: the wrapper exports
+`AGENT_INVOKED_BY=cron`, and `python3 -m agent run --trigger cron` without that
+variable is recorded as `manual`. A hand-run cycle therefore cannot masquerade
+as scheduled autonomy in the evidence.
 
 ### Canvas access
 
@@ -98,14 +111,25 @@ description are all treated as `PAUSED`.
 
 ### Decision logic
 
-Gates, in order: breaker closed → under the hourly cap → control line RUNNING →
-something worth saying. Entries are scored on substance (length), novelty
-(unseen), how under-served the thread is, whether it asks a question, and
-whether it touches topics the agent can speak to concretely. It replies to the
-single highest-scoring entry, and skips anything that is its own, already
-replied to, under 120 characters, or quarantined as an injection attempt.
+Gates, in order: breaker closed → under the hourly cap → min spacing elapsed →
+control line RUNNING → something worth saying.
 
-If nothing merits a reply it may open **one** new thread, but only when the
+Candidates are drawn from **both** top-level entries and the replies inside
+threads. Canvas threading is flat — a reply is always POSTed under its parent
+entry — so the agent can answer a specific reply even in a thread it has
+already posted in. A reply that arrived *after* one of the agent's own posts in
+that thread is treated as addressed to it and gets a large scoring bonus, which
+is what turns the agent from a broadcaster into a participant.
+
+Items are scored on substance (length), novelty (unseen), how under-served the
+thread is, whether they ask a question, and whether they touch topics the agent
+can speak to concretely. It responds to the single highest-scoring item, and
+skips anything that is its own, already answered, under 120 characters, or
+quarantined as an injection attempt. Because idempotency is keyed to the
+specific item answered (the `responses` table), answering a reply never
+re-opens an entry it already handled.
+
+If nothing merits a response it may open **one** new thread, but only when the
 forum already contains substantive discussion, no post has gone out in six
 hours, and at least 24 hours have passed since its last thread. Otherwise it
 posts nothing and records `no_action` — the common case, by design.
@@ -116,12 +140,14 @@ reachable, so the agent still works headless.
 
 ### Persistent local memory
 
-SQLite at `var/memory.db` (WAL, `synchronous=FULL`), five tables:
+SQLite at `var/memory.db` (WAL, `synchronous=FULL`), six tables:
 
 - `seen_items` — every entry/reply id it has read, with `is_self` so it never
   responds to its own posts
 - `intents` — the two-phase write log (below)
 - `posts` — durable ledger of confirmed posts; backs rate limiting and evidence
+- `responses` — which specific entry/reply each of our posts answered, so
+  "have I already replied to *this*?" is exact rather than per-thread
 - `runs` — one row per cycle with outcome and reason: the autonomy audit trail
 - `breaker` — consecutive failures and cooldown deadline
 
@@ -178,7 +204,7 @@ visible in `python3 -m agent status`.
 ## Testing
 
 ```bash
-python3 tests/test_agent.py       # 29 tests, offline, no token needed
+python3 tests/test_agent.py       # 31 tests, offline, no token needed
 python3 scripts/failure_demo.py   # failure-injection evidence → var/failure_demo.md
 ```
 
@@ -191,7 +217,8 @@ restart persistence, the rate-limit cap, and the breaker opening and resetting.
 
 ```
 agent/        config, canvas client, sanitizer, memory, decision logic, runner, CLI
-scripts/      run_cycle.sh (cron entry), install_cron.sh, failure_demo.py
+scripts/      run_cycle.sh (scheduler entry), install_launchd.sh (macOS),
+              install_cron.sh (Linux), failure_demo.py
 tests/        offline test suite with a fake Canvas
 docs/         ARCHITECTURE.md, SUBMISSION.md
 var/          local state — gitignored (memory.db, logs, evidence)

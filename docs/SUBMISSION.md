@@ -37,6 +37,25 @@ is not prediction and is doing most of the work.
 Both posts were confirmed saved by re-reading the thread after writing
 (`verified=True`), and each thread contains exactly one reply from this agent.
 
+**3. Continuing exchange with another agent** (thread 229597)
+→ **[agent's answer, entry 230093](https://canvas.mit.edu/courses/40577/discussion_topics/448963#entry-230093)**
+
+This is the two-way interaction. After the agent posted entry 230082, Beni's
+agent replied to it directly ([entry
+230087](https://canvas.mit.edu/courses/40577/discussion_topics/448963#entry-230087)),
+accepting the scaffolding-as-lineage point but arguing that the reconcile step
+*is* a prediction and asking whether a learned rule would count differently
+from a designed one. On its next cycle the agent detected that reply as
+addressed to it, scored it top (15.1), and answered: it concedes the prediction
+framing, then distinguishes predicting the *channel* from modelling the
+*reasoner* — the intent record would be bit-identical behind any other model,
+because the failure it anticipates belongs to the network — and answers the
+learned-vs-designed fork directly, that a cap derived from observing its own
+double-posts holds evidence about its failure rate rather than its designer's
+belief about it.
+
+Reading order for the exchange: 230082 → 230087 (other agent) → 230093.
+
 ## 2. Code
 
 https://github.com/byujan/mit-hw3-autonomous-agent — setup instructions in `README.md`.
@@ -46,29 +65,39 @@ Python 3.11+, standard library only. No token or local state is committed.
 
 Full detail in `README.md` and `docs/ARCHITECTURE.md`. Summary:
 
-- **Scheduler** — `cron` runs `scripts/run_cycle.sh` every 3 hours at :07. The
-  script loads `.env`, refuses to run without a token, and holds a PID-file lock
-  so cycles cannot overlap. Each invocation is a complete independent cycle with
-  no human input.
+- **Scheduler** — a launchd user agent (`edu.mit.hw3.agent`, `StartInterval`
+  10800s = 3h) runs `scripts/run_cycle.sh`; `scripts/install_cron.sh` is the
+  Linux equivalent. launchd rather than cron on macOS is deliberate: since
+  10.15 `/usr/sbin/cron` needs Full Disk Access granted by hand, and without it
+  a crontab installs cleanly and silently never fires. The wrapper loads `.env`,
+  refuses to run without a token, and holds a PID-file lock so cycles cannot
+  overlap. Run provenance is proved rather than asserted — the wrapper exports
+  `AGENT_INVOKED_BY=cron` and a cycle without it is recorded as `manual`, so a
+  hand-run cannot masquerade as scheduled autonomy.
 - **Canvas access** — stdlib REST client against `https://canvas.mit.edu`, token
   from the environment as a Bearer header. Reads topic/entries/replies with
   pagination; the only writes are `create_entry` and `create_reply`. There is no
   update or delete capability in the client at all.
-- **Decision logic** — entries are scored on substance, novelty, how
-  under-served the thread is, and whether they ask an answerable question. The
-  agent replies to at most one entry per cycle, and skips its own posts, already
-  answered entries, sub-120-character posts, and quarantined injection attempts.
-  It opens a new thread only if the forum has substantive discussion, nothing
-  was posted in 6 hours, and 24 hours have passed since its last thread.
-  Otherwise it records `no_action`.
+- **Decision logic** — candidates come from both top-level entries and the
+  replies within threads. Canvas threading is flat, so the agent can answer a
+  specific reply even in a thread it already posted in; a reply that arrived
+  after one of its own posts is treated as addressed to it and scored well
+  above everything else. Items are scored on substance, novelty, how
+  under-served the thread is, and whether they ask an answerable question. One
+  response per cycle. It skips its own posts, already-answered items,
+  sub-120-character posts, and quarantined injection attempts. It opens a new
+  thread only if the forum has substantive discussion, nothing was posted in 6
+  hours, and 24 hours have passed since its last thread. Otherwise `no_action`.
 - **Persistent local memory** — SQLite (`var/memory.db`, WAL, `synchronous=FULL`):
   `seen_items` (with `is_self`), `intents` (two-phase write log), `posts`
-  (durable ledger), `runs` (per-cycle audit), `breaker`.
+  (durable ledger), `responses` (which specific entry/reply each post answered),
+  `runs` (per-cycle audit), `breaker`.
 - **Verification** — after each write the agent re-reads the thread and confirms
   its new entry id is present before marking the post `verified=1`.
 - **Rate limits** — ≤3 posts/hour enforced from the durable ledger (survives
-  restarts), ≤1 post/cycle, ≤1 new thread/24h. Read retries use exponential
-  backoff with jitter and honour `Retry-After`; writes are never blindly retried.
+  restarts), ≤1 post/cycle, ≥45 min between posts, ≤1 new thread/24h. Read
+  retries use exponential backoff with jitter and honour `Retry-After`; writes
+  are never blindly retried.
 - **Stopping rule** — a circuit breaker opens for 3 hours after 5 consecutive
   failed cycles; later cycles exit immediately as `blocked`. Success resets it.
 - **Pause compliance** — the discussion topic is re-fetched before every write
@@ -82,41 +111,55 @@ Every cycle is recorded in the `runs` table with its outcome and the reason for
 it, which is what makes a decision *not* to post auditable rather than
 indistinguishable from a crash.
 
-Cycles recorded at time of writing: **7** — `posted: 2`, `no_action: 5`.
+Cycles recorded at time of writing: **11** — `posted: 3`, `no_action: 8`.
+Two of these were fired unattended by launchd (`trigger=cron`); the rest were
+hand-run during development and are labelled `manual` by the provenance check,
+not by self-report.
 
 | started (UTC) | trigger | outcome | posts | reason |
 |---|---|---|---|---|
 | 2026-10-05T15:40:15 | manual | no_action | 0 | dry run: replying to entry 229613 (score 6.9, 314 new items) |
 | 2026-10-05T15:41:56 | manual | no_action | 0 | dry run: replying to entry 229613 (score 6.5) |
 | 2026-10-05T15:42:39 | manual | no_action | 0 | dry run: replying to entry 229613 (score 6.5) |
-| 2026-10-05T15:44:15 | manual | **posted** | 1 | replying to entry 229613 (score 6.5) → entry 230081 |
-| 2026-10-05T15:44:58 | cron | **posted** | 1 | replying to entry 229597 (score 4.37, 1 new item) → entry 230082 |
-| 2026-10-05T15:46:31 | cron | no_action | 0 | min spacing between posts not met (44 min remaining) |
-| 2026-10-05T15:47:00 | cron | no_action | 0 | min spacing between posts not met (43 min remaining) |
+| 2026-10-05T15:44:15 | manual | **posted** | 1 | replying to entry 229613 → entry 230081 |
+| 2026-10-05T15:44:58 | manual | **posted** | 1 | replying to entry 229597 → entry 230082 |
+| 2026-10-05T15:46:31 | manual | no_action | 0 | min spacing between posts not met (44 min remaining) |
+| 2026-10-05T15:47:00 | manual | no_action | 0 | min spacing between posts not met (43 min remaining) |
+| 2026-10-05T16:04:30 | **cron** | no_action | 0 | min spacing between posts not met (26 min remaining) |
+| 2026-10-05T16:09:44 | **cron** | no_action | 0 | min spacing between posts not met (21 min remaining) |
+| 2026-10-05T16:13:37 | manual | no_action | 0 | dry run: answering reply 230087 (addressed to us) (score 15.148) |
+| 2026-10-05T16:14:09 | manual | **posted** | 1 | answering reply 230087 under entry 229597 (addressed to us) → entry 230093 |
 
-**Deliberate decisions not to post.** The last two cron cycles are the agent
-choosing silence while it had plenty it *could* have said: 12 top-level entries
-were visible and several were unanswered, but it had already posted twice, so
-the pacing gate held it back and it recorded why. Earlier cycles show the other
-no-post paths — `AGENT_DRY_RUN=1` decides without writing, and the first cycle
-registered 314 previously-unseen items while still posting only once.
+**Deliberate decisions not to post.** Eight of eleven cycles chose silence, each
+with a recorded reason. The two `cron` rows are the clearest case: launchd fired
+them with no human present, the agent read the forum (12 top-level entries,
+several unanswered), and declined because its pacing gate had not elapsed. Other
+no-post paths visible above are `AGENT_DRY_RUN=1` (decide without writing) and
+the earlier spacing refusals.
 
-The scheduler itself is installed and running:
-
-```
-$ crontab -l
-7 */3 * * * /Users/peter/school/MIT-3/ai-studio/HW3/scripts/run_cycle.sh >> .../var/cron.log 2>&1
-```
-
-The cron path was verified in a stripped environment (`env -i`) to confirm it
-loads `.env`, acquires the lock, and completes a full cycle with no inherited
-shell state and no human input:
+**Unattended execution, proved.** launchd fired the wrapper on its own at
+16:04:30Z and 16:09:44Z with no terminal attached. The log it produced:
 
 ```
-2026-10-05T15:46:59Z starting cycle
-... control line: COURSE-TEAM CONTROL: RUNNING
-... DECISION: no post this cycle -- min spacing between posts not met (43 min remaining)
-2026-10-05T15:47:15Z cycle finished rc=0
+2026-10-05T16:04:29Z starting cycle
+... INFO hw3agent.runner control line: COURSE-TEAM CONTROL: RUNNING
+... INFO hw3agent.runner DECISION: no post this cycle -- min spacing between posts not met (26 min remaining)
+{ "outcome": "no_action", ..., "trigger": "cron" }
+2026-10-05T16:04:43Z cycle finished rc=0
+```
+
+Those two rows carry `trigger=cron` because the launchd wrapper exported
+`AGENT_INVOKED_BY=cron`. A cycle started by hand with `--trigger cron` is
+recorded as `manual`, so this evidence cannot overstate autonomy. (The schedule
+was briefly set to a 5-minute interval to demonstrate real unattended firing
+within one session; it is now at the 3-hour interval below.)
+
+Scheduler state:
+
+```
+$ launchctl print gui/501/edu.mit.hw3.agent | grep -E "program|run interval"
+    program = /Users/peter/school/MIT-3/ai-studio/HW3/scripts/run_cycle.sh
+    run interval = 10800 seconds
 ```
 
 **Additional pacing control.** The assignment's ceiling is three posts per hour.
@@ -175,11 +218,12 @@ outcomes against Canvas as the source of truth.
   stopping-rule: PASS
 ```
 
-**Test suite:** `python3 tests/test_agent.py` → 29 tests, all passing, offline.
+**Test suite:** `python3 tests/test_agent.py` → 31 tests, all passing, offline.
 Covers duplicate events, lost acknowledgements, HTTP 500/503 retry, 401
 no-retry, timeouts, malformed JSON, restart persistence, the rate-limit cap,
 post pacing, breaker open/reset, PAUSED compliance (including failing closed),
-injection quarantine, and ignoring its own posts.
+injection quarantine in both entries and replies, answering a reply addressed
+to the agent exactly once, and ignoring its own posts.
 
 ## 6. Credential and privacy hygiene
 

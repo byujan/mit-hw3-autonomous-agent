@@ -245,7 +245,12 @@ def run_cycle(cfg, *, trigger: str = "cron", client: CanvasClient | None = None)
 
         canvas_id = str(created["id"])
         verified = _verify_post(client, cfg, action, decision.target_id, canvas_id, expected)
-        memory.confirm_intent(key, canvas_id, verified=verified)
+        cand = decision.candidate
+        memory.confirm_intent(
+            key, canvas_id, verified=verified,
+            prompt_item_type=cand.prompt_item_type if cand else None,
+            prompt_item_id=cand.prompt_item_id if cand else None,
+        )
         memory.record_success()
 
         url = entry_url(cfg, cfg.topic_id, canvas_id)

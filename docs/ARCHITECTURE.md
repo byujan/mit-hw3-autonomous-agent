@@ -3,17 +3,18 @@
 ## Cycle sequence
 
 ```
-cron (every 3h, :07)
+launchd (every 3h; cron on Linux)
   │
   ├─ scripts/run_cycle.sh
   │    ├─ load .env            (secrets never on argv)
   │    ├─ refuse if no token
+  │    ├─ export AGENT_INVOKED_BY=cron   (provenance the agent can verify)
   │    └─ PID-file lock        (no overlapping cycles ⇒ no double-post)
   │
   └─ python3 -m agent run
        │
        ├─ 1. memory.start_run(trigger)
-       │       └─ runs row: this cycle is now auditable even if it crashes
+       │       trigger downgraded to 'manual' unless AGENT_INVOKED_BY=cron
        │
        ├─ 2. breaker check ─────────────► open?  ⇒ outcome=blocked, exit
        │
@@ -32,7 +33,10 @@ cron (every 3h, :07)
        │       mark every item seen; flag is_self
        │
        ├─ 6. decide()
-       │       gates: rate limit → candidates → substance → injection screen
+       │       candidates = unanswered entries + unanswered replies
+       │         a reply newer than our own post in that thread
+       │         ⇒ addressed_to_us, +6.0 score (conversation first)
+       │       gates: rate limit → spacing → substance → injection screen
        │       outcome: reply | new_thread | nothing  (nothing is normal)
        │
        ├─ 7. two-phase write (only if acting)
@@ -40,6 +44,7 @@ cron (every 3h, :07)
        │         ├─ duplicate key ⇒ idempotent stop
        │         └─ POST ──► Canvas
        │               ├─ success ⇒ re-read & verify ⇒ confirm_intent
+       │               │              + responses row (which item we answered)
        │               └─ failure ⇒ fail_intent, stays pending for step 3
        │
        └─ 8. record_success() | record_failure()
@@ -77,7 +82,8 @@ different content produces a different key.
 | `seen_items` | one per entry/reply read | never reprocess; never engage with `is_self=1` |
 | `intents` | one per intended write | `pending → confirmed \| abandoned`; the crash-recovery log |
 | `posts` | one per confirmed post | rate-limit ledger + evidence links |
-| `runs` | one per cycle | autonomy audit trail: outcome + reason |
+| `responses` | one per item answered | exact idempotency: "have I answered *this reply*?" |
+| `runs` | one per cycle | autonomy audit trail: outcome + reason + proved trigger |
 | `breaker` | exactly one | consecutive failures, cooldown deadline |
 
 `journal_mode=WAL` with `synchronous=FULL`, and every mutation is a single

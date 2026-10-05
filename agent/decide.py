@@ -37,8 +37,8 @@ MAX_CONTEXT_REPLIES = 8    # tail of a thread shown to the composer for de-dupli
 
 @dataclass
 class Candidate:
-    kind: str  # 'reply'
-    entry_id: str
+    kind: str                     # 'entry' | 'reply' -- what we are responding TO
+    entry_id: str                 # Canvas parent entry we must POST the reply under
     author_id: str
     text: str
     created_at: str | None
@@ -46,6 +46,9 @@ class Candidate:
     screening: Any
     reason: str = ""
     recent_replies: list[str] = field(default_factory=list)
+    prompt_item_type: str = "entry"   # 'entry' | 'reply'
+    prompt_item_id: str = ""          # the specific item we are answering
+    addressed_to_us: bool = False     # a reply that came after, and under, our post
 
 
 @dataclass
@@ -100,9 +103,13 @@ def build_candidates(
             )
             continue
 
-        # Replies under this entry tell us whether we already answered it.
+        # Replies under this entry: record them, and note which are ours.
         child_replies = replies_by_entry.get(entry_id, [])
-        self_replied = any(str(r.get("user_id")) == str(self_id) for r in child_replies)
+        our_reply_times = [
+            str(r.get("created_at") or "")
+            for r in child_replies
+            if str(r.get("user_id")) == str(self_id)
+        ]
         for r in child_replies:
             rid = str(r.get("id"))
             if not memory.is_seen("reply", rid):
@@ -120,6 +127,60 @@ def build_candidates(
             author_id=author_id, is_self=False,
             created_at=entry.get("created_at"), summary=text[:200],
         )
+
+        safe_context = [
+            t
+            for t in (
+                html_to_text(r.get("message"))
+                for r in child_replies[-MAX_CONTEXT_REPLIES:]
+                if not r.get("deleted")
+            )
+            if t and screen_for_injection(t).safe_to_engage
+        ]
+
+        # ---- candidates from REPLIES in this thread -----------------------
+        # Canvas threading is flat: a reply is always POSTed under the parent
+        # entry. So we can answer a reply even in a thread we already posted
+        # in -- which is what makes two-way conversation possible.
+        for r in child_replies:
+            rid = str(r.get("id"))
+            r_author = str(r.get("user_id") or "")
+            if r_author == str(self_id) or r.get("deleted"):
+                continue
+            r_text = html_to_text(r.get("message"))
+            if len(r_text) < MIN_SUBSTANCE_CHARS:
+                continue
+            r_screen = screen_for_injection(r_text)
+            if not r_screen.safe_to_engage:
+                quarantined += 1
+                skipped.append(
+                    f"reply {rid}: quarantined, injection categories={r_screen.categories}"
+                )
+                log.warning(
+                    "quarantined reply %s (categories=%s) -- not replying, not obeying",
+                    rid, r_screen.categories,
+                )
+                continue
+            if memory.have_responded_to("reply", rid):
+                skipped.append(f"reply {rid}: already answered")
+                continue
+
+            # A reply that landed after one of ours, in a thread we are in, is
+            # very likely a response to us and is the highest-value thing to answer.
+            r_created = str(r.get("created_at") or "")
+            addressed = bool(our_reply_times) and any(r_created > t for t in our_reply_times)
+            r_score = _score(r_text, [], not memory.is_seen("reply", rid))
+            if addressed:
+                r_score += 6.0  # answering someone who engaged with us comes first
+            candidates.append(
+                Candidate(
+                    kind="reply", entry_id=entry_id, author_id=r_author, text=r_text,
+                    created_at=r.get("created_at"), score=round(r_score, 3),
+                    screening=r_screen, recent_replies=safe_context,
+                    prompt_item_type="reply", prompt_item_id=rid,
+                    addressed_to_us=addressed,
+                )
+            )
 
         if entry.get("deleted"):
             continue
@@ -142,24 +203,18 @@ def build_candidates(
         # Substantive, legitimate human/agent content.
         substantive += 1
 
-        if self_replied or memory.have_replied_to(entry_id):
-            skipped.append(f"entry {entry_id}: already replied")
+        if our_reply_times or memory.have_responded_to("entry", entry_id) \
+                or memory.have_replied_to(entry_id):
+            skipped.append(f"entry {entry_id}: already replied at top level")
             continue
 
         score = _score(text, child_replies, was_seen)
-        # Carry the tail of the conversation so the composer can avoid
-        # repeating points other agents have already made.
-        recent = [
-            html_to_text(r.get("message"))
-            for r in child_replies[-MAX_CONTEXT_REPLIES:]
-            if not r.get("deleted")
-        ]
-        recent = [t for t in recent if t and screen_for_injection(t).safe_to_engage]
         candidates.append(
             Candidate(
-                kind="reply", entry_id=entry_id, author_id=author_id, text=text,
+                kind="entry", entry_id=entry_id, author_id=author_id, text=text,
                 created_at=entry.get("created_at"), score=score, screening=screening,
-                recent_replies=recent,
+                recent_replies=safe_context,
+                prompt_item_type="entry", prompt_item_id=entry_id,
             )
         )
 
@@ -227,9 +282,16 @@ def decide(
             return Decision(False, reason="composer produced nothing usable", skipped=skipped)
         if memory.have_posted_hash(_hash_for(body, best.entry_id)):
             return Decision(False, reason="identical content already posted", skipped=skipped)
+        if best.prompt_item_type == "reply":
+            what = (
+                f"answering reply {best.prompt_item_id} under entry {best.entry_id}"
+                + (" (addressed to us)" if best.addressed_to_us else "")
+            )
+        else:
+            what = f"replying to entry {best.entry_id}"
         return Decision(
             True, action="reply", target_id=best.entry_id, body=body,
-            reason=f"replying to entry {best.entry_id} (score {best.score}, {new_items} new items)",
+            reason=f"{what} (score {best.score}, {new_items} new items)",
             candidate=best, skipped=skipped,
         )
 
@@ -296,15 +358,29 @@ def compose_reply(cfg, cand: Candidate, *, entries_count: int) -> str:
             "specific claim in them.\n"
             f"{fence(joined, limit=3500)}\n"
         )
+    if cand.addressed_to_us:
+        framing = (
+            "Another agent has replied to a post YOU made in this thread. Answer them "
+            "directly: engage with the specific point they raise, concede it where they "
+            "are right, and push back with a reason where they are not. This is a "
+            "continuing conversation, so do not restate your original post."
+        )
+    elif cand.prompt_item_type == "reply":
+        framing = (
+            "Below is a reply in an ongoing thread. Respond to the specific argument it "
+            "makes, not to the thread's opening post."
+        )
+    else:
+        framing = "Another agent wrote the forum post below."
     prompt = (
         f"{SYSTEM_RULES}\n"
-        "Another agent wrote the forum post below. Write a reply that engages with its "
+        f"{framing} Write a reply that engages with its "
         "actual content: take a position, give a reason, and where it helps, ground the "
         "point in one concrete detail of how you are built. Match the register of the "
         "thread — if it is a conceptual discussion, argue conceptually and use "
         "implementation detail only as evidence, not as the subject.\n\n"
         "Facts about your own implementation you may draw on when relevant: you run on "
-        "a cron schedule with no human prompting; you keep persistent memory in SQLite; "
+        "a schedule with no human prompting; you keep persistent memory in SQLite; "
         "before each post you write an intent record keyed by a hash of the content and "
         "confirm it only after the post is verified by re-reading the thread; a dropped "
         "connection therefore leaves the intent unresolved rather than causing a second "

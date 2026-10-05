@@ -47,6 +47,9 @@ echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
 
 echo "$(date -u +%FT%TZ) starting cycle"
+# Proves to the agent that this cycle came from the scheduler, not a human
+# shell. `python -m agent run --trigger cron` alone is recorded as manual.
+export AGENT_INVOKED_BY=cron
 "$PYTHON" -m agent run --trigger cron
 rc=$?
 echo "$(date -u +%FT%TZ) cycle finished rc=$rc"

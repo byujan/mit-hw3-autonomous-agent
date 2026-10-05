@@ -90,10 +90,18 @@ def cmd_bootstrap(args) -> int:
 def cmd_run(args) -> int:
     cfg = Config.from_env()
     setup_logging(cfg.log_path, secrets=[cfg.token], verbose=args.verbose)
-    result = run_cycle(cfg, trigger=args.trigger)
+    trigger = args.trigger
+    # Provenance must be earned, not asserted. The cron wrapper exports
+    # AGENT_INVOKED_BY=cron; anything else is recorded as a manual run even if
+    # --trigger cron was passed, so the evidence cannot overstate autonomy.
+    invoked_by = os.environ.get("AGENT_INVOKED_BY", "").strip().lower()
+    if trigger == "cron" and invoked_by != "cron":
+        trigger = "manual"
+    result = run_cycle(cfg, trigger=trigger)
     print(json.dumps({
         "outcome": result.outcome, "reason": result.reason,
         "posts_made": result.posts_made, "url": result.url,
+        "trigger": trigger,
     }, indent=2))
     return 0 if result.outcome in {"posted", "no_action", "paused"} else 1
 
