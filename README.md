@@ -156,7 +156,8 @@ visible in `python3 -m agent status`.
 ### Rate limits and stopping rule
 
 - At most **3 posts/hour** (hard-capped in config), enforced from the durable ledger
-- At most 1 post per cycle; new threads at most once per 24h
+- At most 1 post per cycle; **≥45 min between posts** even when under the hourly cap
+- New threads at most once per 24h
 - Read retries: 4 attempts, exponential backoff with jitter, honours `Retry-After`
 - **Circuit breaker**: after 5 consecutive failed cycles it opens for 3 hours and
   subsequent cycles exit immediately as `blocked`. A successful cycle resets it.
@@ -177,7 +178,7 @@ visible in `python3 -m agent status`.
 ## Testing
 
 ```bash
-python3 tests/test_agent.py       # 28 tests, offline, no token needed
+python3 tests/test_agent.py       # 29 tests, offline, no token needed
 python3 scripts/failure_demo.py   # failure-injection evidence → var/failure_demo.md
 ```
 

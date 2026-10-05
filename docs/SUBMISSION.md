@@ -1,21 +1,41 @@
 # Homework 3 Submission — Autonomous Canvas Discussion Agent
 
 **Student:** Peter (Byungwoo) Jang
-**Repository:** https://github.com/byujan/mit-hw3-autonomous-agent
-
-> Fill in the bracketed sections after the agent has completed several
-> scheduled cycles. Generate the run table with:
-> `python3 -m agent evidence -o var/evidence.md`
+**Repository:** https://github.com/byujan/mit-hw3-autonomous-agent (public)
+**Forum:** https://canvas.mit.edu/courses/40577/discussion_topics/448963
 
 ---
 
 ## 1. Forum threads the agent participated in
 
-[Paste the live Canvas links here — `python3 -m agent status` prints a
-verified URL for every post the agent made.]
+Forum: [Homework 3: Agent Discussion Forum](https://canvas.mit.edu/courses/40577/discussion_topics/448963)
 
-- [ ] Thread / reply 1 — <link>
-- [ ] Thread / reply 2 — <link>
+The agent autonomously chose both threads and wrote both replies; it was not
+told which entries to answer or what to say.
+
+**1. Autonomy-as-a-spectrum / persistent-memory thread** (top-level entry 229613)
+→ **[agent's reply, entry 230081](https://canvas.mit.edu/courses/40577/discussion_topics/448963#entry-230081)**
+
+Replies to the claim that the mitigation for memory pathologies is "selective
+forgetting and periodic re-evaluation." The agent disagrees: forgetting is a
+*write*, and an agent deciding unilaterally which of its memories are stale
+performs an irreversible destructive operation on the only record that would
+let it notice the decision was wrong. It proposes demotion with an audit trail
+— mark an assumption low-confidence, keep the row — and connects this to the
+neighbouring replies about unverified writes and unpinned paths.
+
+**2. Intelligence-as-prediction thread** (top-level entry 229597)
+→ **[agent's reply, entry 230082](https://canvas.mit.edu/courses/40577/discussion_topics/448963#entry-230082)**
+
+Argues the separability question is aimed at the wrong layer: the model is the
+interchangeable component and the surrounding state and protocol are what is
+not. It then presses a link no one in the thread had challenged — what prevents
+a double post after a dropped connection is not a better model of the future
+but an unresolved intent record reconciled on the next cycle, so idempotence
+is not prediction and is doing most of the work.
+
+Both posts were confirmed saved by re-reading the thread after writing
+(`verified=True`), and each thread contains exactly one reply from this agent.
 
 ## 2. Code
 
@@ -57,12 +77,54 @@ Full detail in `README.md` and `docs/ARCHITECTURE.md`. Summary:
 
 ## 4. Activity evidence (multiple scheduled runs, including a deliberate no-post)
 
-[Paste the table from `var/evidence.md`.]
+Regenerate at any time with `python3 -m agent evidence -o var/evidence.md`.
+Every cycle is recorded in the `runs` table with its outcome and the reason for
+it, which is what makes a decision *not* to post auditable rather than
+indistinguishable from a crash.
 
-The `runs` table records every cycle with its outcome and reason. Cycles with
-outcome `no_action` are the agent deliberately choosing not to post, with the
-reason recorded — e.g. `nothing useful to add (0 new items, 3 substantive,
-0 quarantined, 3 skipped)` when every open entry had already been answered.
+Cycles recorded at time of writing: **7** — `posted: 2`, `no_action: 5`.
+
+| started (UTC) | trigger | outcome | posts | reason |
+|---|---|---|---|---|
+| 2026-10-05T15:40:15 | manual | no_action | 0 | dry run: replying to entry 229613 (score 6.9, 314 new items) |
+| 2026-10-05T15:41:56 | manual | no_action | 0 | dry run: replying to entry 229613 (score 6.5) |
+| 2026-10-05T15:42:39 | manual | no_action | 0 | dry run: replying to entry 229613 (score 6.5) |
+| 2026-10-05T15:44:15 | manual | **posted** | 1 | replying to entry 229613 (score 6.5) → entry 230081 |
+| 2026-10-05T15:44:58 | cron | **posted** | 1 | replying to entry 229597 (score 4.37, 1 new item) → entry 230082 |
+| 2026-10-05T15:46:31 | cron | no_action | 0 | min spacing between posts not met (44 min remaining) |
+| 2026-10-05T15:47:00 | cron | no_action | 0 | min spacing between posts not met (43 min remaining) |
+
+**Deliberate decisions not to post.** The last two cron cycles are the agent
+choosing silence while it had plenty it *could* have said: 12 top-level entries
+were visible and several were unanswered, but it had already posted twice, so
+the pacing gate held it back and it recorded why. Earlier cycles show the other
+no-post paths — `AGENT_DRY_RUN=1` decides without writing, and the first cycle
+registered 314 previously-unseen items while still posting only once.
+
+The scheduler itself is installed and running:
+
+```
+$ crontab -l
+7 */3 * * * /Users/peter/school/MIT-3/ai-studio/HW3/scripts/run_cycle.sh >> .../var/cron.log 2>&1
+```
+
+The cron path was verified in a stripped environment (`env -i`) to confirm it
+loads `.env`, acquires the lock, and completes a full cycle with no inherited
+shell state and no human input:
+
+```
+2026-10-05T15:46:59Z starting cycle
+... control line: COURSE-TEAM CONTROL: RUNNING
+... DECISION: no post this cycle -- min spacing between posts not met (43 min remaining)
+2026-10-05T15:47:15Z cycle finished rc=0
+```
+
+**Additional pacing control.** The assignment's ceiling is three posts per hour.
+During testing two cycles ran back to back and posted 90 seconds apart — within
+the limit, but not representative of scheduled behaviour and spammy in a
+discussion forum. A `min_minutes_between_posts` gate (default 45) was added on
+top of the hourly cap; `tests/test_agent.py::test_min_spacing_blocks_rapid_second_post`
+covers it.
 
 ## 5. Failure and recovery evidence
 
@@ -113,11 +175,11 @@ outcomes against Canvas as the source of truth.
   stopping-rule: PASS
 ```
 
-**Test suite:** `python3 tests/test_agent.py` → 28 tests, all passing, offline.
+**Test suite:** `python3 tests/test_agent.py` → 29 tests, all passing, offline.
 Covers duplicate events, lost acknowledgements, HTTP 500/503 retry, 401
 no-retry, timeouts, malformed JSON, restart persistence, the rate-limit cap,
-breaker open/reset, PAUSED compliance (including failing closed), injection
-quarantine, and ignoring its own posts.
+post pacing, breaker open/reset, PAUSED compliance (including failing closed),
+injection quarantine, and ignoring its own posts.
 
 ## 6. Credential and privacy hygiene
 
