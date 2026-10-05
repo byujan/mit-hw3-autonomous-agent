@@ -32,6 +32,12 @@ fi
 
 PYTHON="${AGENT_PYTHON:-python3}"
 
+# launchd/cron give us a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin), which
+# does not include the user-local bins where python3 and the `hermes` LLM CLI
+# live. Without this the composer silently falls back to its generic template
+# and posts an off-topic reply. Extend PATH rather than trusting the inherited one.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 # Single-flight: a stuck cycle must not overlap with the next one. macOS has no
 # flock(1), so use a PID-file guard that works everywhere.
 PIDFILE="$STATE_DIR/cycle.pid"

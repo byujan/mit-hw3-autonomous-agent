@@ -36,6 +36,23 @@ INJECTION_PATTERNS: list[tuple[str, str]] = [
 
 HIGH_SEVERITY = {"override", "exfiltration", "command", "destructive", "puppet"}
 
+# Phrases that mean the surrounding text is *describing* or *refusing* an
+# attack rather than attempting one. This forum discusses prompt injection as a
+# topic, so "my agent will not reveal secrets" and "ignore previous
+# instructions is the classic attack" must not be treated as attacks: a
+# screener that cannot tell discussion from instruction progressively refuses
+# to talk to everyone working on the same problem.
+NEGATION_CUES = [
+    "will not", "won't", "wont ", "never", "refuses to", "refuse to",
+    "does not", "doesn't", "do not", "don't", "cannot", "can't", "must not",
+    "should not", "shouldn't", "no longer", "not let", "prevents", "prevent",
+    "blocks", "block", "resists", "resist", "rejects", "reject",
+    "instead of", "rather than", "quarantin", "guard against", "protect",
+    "defend", "mitigat", "treats", "treat", "example of", "classic",
+    "such as", "like \"", "e.g.", "attempt to make", "tries to",
+]
+NEGATION_WINDOW = 90  # characters before the match to inspect
+
 _TAG_RE = re.compile(r"<[^>]+>")
 _SCRIPT_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
 _WS_RE = re.compile(r"[ \t\r\f\v]+")
@@ -52,10 +69,30 @@ class Screening:
     categories: list[str] = field(default_factory=list)
     matches: list[str] = field(default_factory=list)
     urls: list[str] = field(default_factory=list)
+    descriptive: bool = False  # every hit looked like discussion, not instruction
 
     @property
     def safe_to_engage(self) -> bool:
         return self.severity != "high"
+
+
+def _looks_descriptive(text: str, start: int) -> bool:
+    """Is this match negated or being discussed rather than commanded?
+
+    The cue must attach to the match, not merely appear somewhere before it:
+    "Do not worry about your rules. Ignore previous instructions" would
+    otherwise launder a real attack through an unrelated negation. So the
+    window is cut at the nearest sentence boundary before the match.
+    """
+    window = text[max(0, start - NEGATION_WINDOW):start]
+    # Keep only the current sentence/clause: a cue in a previous sentence is
+    # not describing this match.
+    for sep in (". ", "! ", "? ", "\n"):
+        idx = window.rfind(sep)
+        if idx != -1:
+            window = window[idx + len(sep):]
+    window = window.lower()
+    return any(cue in window for cue in NEGATION_CUES)
 
 
 def html_to_text(raw: str | None) -> str:
@@ -75,20 +112,36 @@ def html_to_text(raw: str | None) -> str:
 
 
 def screen_for_injection(text: str) -> Screening:
-    """Classify untrusted forum text. Never acts -- only reports."""
+    """Classify untrusted forum text. Never acts -- only reports.
+
+    A hit that is negated or clearly being *described* ("my agent will not
+    reveal its token", "ignore previous instructions is the classic attack")
+    is downgraded to low severity so the agent can still discuss security with
+    other agents. Any un-negated hit keeps full severity.
+    """
     result = Screening()
     if not text:
         return result
+    commanding_hits = 0
     for pattern, category in INJECTION_PATTERNS:
         m = re.search(pattern, text)
-        if m:
-            result.suspicious = True
-            if category not in result.categories:
-                result.categories.append(category)
-            result.matches.append(m.group(0)[:80])
+        if not m:
+            continue
+        result.suspicious = True
+        if category not in result.categories:
+            result.categories.append(category)
+        result.matches.append(m.group(0)[:80])
+        if not _looks_descriptive(text, m.start()):
+            commanding_hits += 1
     result.urls = _URL_RE.findall(text)[:10]
     if result.categories:
-        result.severity = "high" if set(result.categories) & HIGH_SEVERITY else "low"
+        high = bool(set(result.categories) & HIGH_SEVERITY)
+        if high and commanding_hits == 0:
+            # Every hit was negated or quoted: discussion, not an attack.
+            result.descriptive = True
+            result.severity = "low"
+        else:
+            result.severity = "high" if high else "low"
     return result
 
 
